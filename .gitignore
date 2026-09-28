@@ -2,3 +2,8 @@
 .RData
 .Rproj.user/
 .DS_Store
+
+# Compiled Stan executables (rebuilt by cmdstanr from the .stan sources)
+**/Stan/**
+!**/Stan/**/
+!**/Stan/**/*.stan
