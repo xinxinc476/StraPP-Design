@@ -1,0 +1,788 @@
+---
+title: "summ_sims_multi"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+remove(list = ls())
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(latex2exp)
+library(gridExtra)
+
+res.beta.strapp <- readRDS(file = '/proj/ibrahimlab/strapp_paper3/R/res_beta_strapp.rds')
+beta.strapp     <- res.beta.strapp$beta.strapp
+beta.strapp     <- c(0.85*beta.strapp[1], beta.strapp)
+names(beta.strapp)[1:2] <- c('trt_LD', 'trt_HD')
+```
+
+
+```{r}
+# compute posterior probabilities of beta < 0
+get_post_prob <- function(n1, a0, sim.dir){
+  files   <- list.files(path = sim.dir, pattern = '.rds')
+  if (a0 == 0){ # a0 = 0 for the reference prior
+    idx     <- grepl(pattern = paste0('_n1_', n1, '_refprior_'), files)
+    files   <- files[idx]
+  } else{
+    idx     <- grepl(pattern = paste0('_n1_', n1, '_a0_', a0), files)
+    files   <- files[idx]
+  }
+  
+  post_prob_betaLD = c()
+  post_prob_betaHD = c()
+  for (i in seq_len(length(files))) {
+    simres <- readRDS(file.path(sim.dir, files[i]))$simres
+    post_prob_betaLD =c(post_prob_betaLD,
+                 as.numeric(unlist(simres %>% filter(variable == 'beta[1]') %>% select('post_prob')))
+    ) 
+    post_prob_betaHD =c(post_prob_betaHD,
+                        as.numeric(unlist(simres %>% filter(variable == 'beta[2]') %>% select('post_prob')))
+    )
+  }
+  
+  return(list(post_prob_betaLD = post_prob_betaLD, post_prob_betaHD = post_prob_betaHD))
+}
+
+# get mean posterior probability of rejection 
+# reject if the posterior probability of beta_trt < 0 is > q, where
+# q = (q_LD, q_HD) is the evidence threshold for low-dose and high-dose for each data set based on the empirical distribution of the posterior probability under the null
+# q = the 97.5th quantile of the empirical sampling distribution of \int Pr(log HR < 0 | D, H0) f(D | H0)
+get_rej_prob <- function(n1, a0, sim.dir, q){
+  post_prob = get_post_prob(n1, a0, sim.dir)
+  ind_low  <- as.numeric(post_prob$post_prob_betaLD > q[1]) 
+  ind_high <- as.numeric(post_prob$post_prob_betaHD > q[2])
+  return( list(prob_rej_low_high = mean(ind_low * ind_high), prob_rej_high = mean(ind_high), prob_rej_low = mean(ind_low)) )
+}
+
+# beta_true = c(beta_LD_true, beta_HD_true)
+get_MSE_trt <- function(beta_true, n1, a0, sim.dir){
+  files   <- list.files(path = sim.dir, pattern = '.rds')
+  if (a0 == 0){ # a0 = 0 for the reference prior
+    idx     <- grepl(pattern = paste0('_n1_', n1, '_refprior_'), files)
+    files   <- files[idx]
+  } else{
+    idx     <- grepl(pattern = paste0('_n1_', n1, '_a0_', a0), files)
+    files   <- files[idx]
+  }
+  
+  MSE_LD = MSE_HD = c()
+  for (i in seq_len(length(files))) {
+    simres <- readRDS(file.path(sim.dir, files[i]))$simres
+    simres.LD <- simres %>% filter(variable == 'beta[1]') %>% mutate(mse_LD = (post_mean - beta_true[1])^2)
+    simres.HD <- simres %>% filter(variable == 'beta[2]') %>% mutate(mse_HD = (post_mean - beta_true[2])^2)
+    MSE_LD =c(MSE_LD, as.numeric(unlist(simres.LD %>% select('mse_LD'))))
+    MSE_HD =c(MSE_HD, as.numeric(unlist(simres.HD %>% select('mse_HD'))))
+  }
+  
+  return(list('MSE_LD' = mean(MSE_LD), 'MSE_HD' = mean(MSE_HD)))
+  
+}
+```
+
+
+# Obtain the Evidence Threshold
+
+```{r}
+# q = the 97.5th quantile of the empirical sampling distribution of \int Pr(log HR < 0 | D, H0) f(D | H0)
+n1 <- seq(550, 750, by = 20)
+n1 <- c(n1, 1000, 1500, 2000)
+n1 <- as.integer(n1)
+
+qHD_list <- sapply(n1, function(x){
+  post_prob = get_post_prob(n1 = x, a0 = 0, sim.dir = '/proj/ibrahimlab/strapp_paper3/multi_hypotheses/Sims/pi_00/refprior_indep')
+  as.numeric(quantile(post_prob$post_prob_betaHD, prob = 0.975))
+})
+
+qLD_list = qHD_list
+names(qLD_list) = names(qHD_list) = paste0('n1 = ', n1)
+
+# function to construct the rejection probability data frame for each prior
+get_rej_prob_grid <- function(grid, sim.dir, prior){
+  if(prior == 'Reference'){
+    rej_prob <- apply(grid, 1, function(r){get_rej_prob(n1 = r[1], a0 = 0, sim.dir = sim.dir, q = c(qLD_list[paste0('n1 = ', r[1])], qHD_list[paste0('n1 = ', r[1])]))})
+    
+    mse <- apply(grid, 1, function(r){get_MSE_trt(beta_true = beta.strapp[1:2], n1 = r[1], a0 = 0, sim.dir = sim.dir)})
+  }else{
+    rej_prob <- apply(grid, 1, function(r){get_rej_prob(n1 = r[1], a0 = r[2], sim.dir = sim.dir, q = c(qLD_list[paste0('n1 = ', r[1])], qHD_list[paste0('n1 = ', r[1])]))})
+    
+    mse <- apply(grid, 1, function(r){get_MSE_trt(beta_true = beta.strapp[1:2], n1 = r[1], a0 = r[2], sim.dir = sim.dir)})  
+  }
+  
+  rej_prob   <- do.call(rbind, rej_prob) %>% as.data.frame
+  mse        <- do.call(rbind, mse) %>% as.data.frame
+  grid       <- cbind(grid, rej_prob, mse)
+  grid$prior <- prior
+  grid$MSE_HD <- as.numeric(grid$MSE_HD)
+  grid$MSE_LD <- as.numeric(grid$MSE_LD)
+  return(grid)
+}
+```
+
+
+
+# Under pi_11
+
+## Obtain Rejection Probability of Low-Dose/High-Dose Effect
+
+under $\pi_{11}^{(s)}$
+
+```{r}
+n1 <- seq(550, 750, by = 20)
+n1 <- c(n1, 1000, 1500, 2000)
+n1 <- as.integer(n1)
+
+a0 <- c(0.2, 0.8)
+grid <- expand.grid(
+  n1 = n1,
+  a0 = a0,
+  stringsAsFactors = FALSE
+)
+
+sim.dir.strapp    <- '/proj/ibrahimlab/strapp_paper3/multi_hypotheses/Sims/pi_11/strapp'
+sim.dir.pp        <- '/proj/ibrahimlab/strapp_paper3/multi_hypotheses/Sims/pi_11/pp'
+sim.dir.ref       <- '/proj/ibrahimlab/strapp_paper3/multi_hypotheses/Sims/pi_11/refprior_indep'
+
+grid.strapp <- get_rej_prob_grid(grid = grid, sim.dir = sim.dir.strapp, prior = 'straPP')
+grid.pp     <- get_rej_prob_grid(grid = grid, sim.dir = sim.dir.pp, prior = 'PP')
+grid.ref    <- get_rej_prob_grid(grid = grid, sim.dir = sim.dir.ref, prior = 'Reference')
+
+df.pi11                   <- rbind(grid.strapp, grid.pp, grid.ref)
+df.pi11$prob_rej_high     <- as.numeric(df.pi11$prob_rej_high)
+df.pi11$prob_rej_low      <- as.numeric(df.pi11$prob_rej_low)
+df.pi11$prob_rej_low_high <- as.numeric(df.pi11$prob_rej_low_high)
+
+# for refprior under pi_{11}
+avg_events_per_n1 <- readRDS("/proj/ibrahimlab/strapp_paper3/multi_hypotheses/R/avg_events_per_n1/refprior_pi11.rds")
+avg_events_per_n1 <- round(avg_events_per_n1)
+
+# ae = avg_events
+for(i in 1:nrow(df.pi11)){
+  df.pi11$x_label[i] <- paste0('n = ', df.pi11$n1[i], '\nae = ', avg_events_per_n1[which(n1 == df.pi11$n1[i])])
+}
+```
+
+
+# Under pi_01
+
+## Obtain Rejection Probability of Low-Dose/High-Dose Effect
+
+under $\pi_{01}^{(s)}$
+
+```{r}
+n1 <- seq(550, 750, by = 20)
+n1 <- c(n1, 1000, 1500, 2000)
+n1 <- as.integer(n1)
+
+a0 <- c(0.2, 0.8)
+grid <- expand.grid(
+  n1 = n1,
+  a0 = a0,
+  stringsAsFactors = FALSE
+)
+
+sim.dir.strapp    <- '/proj/ibrahimlab/strapp_paper3/multi_hypotheses/Sims/pi_01/strapp'
+sim.dir.pp        <- '/proj/ibrahimlab/strapp_paper3/multi_hypotheses/Sims/pi_01/pp'
+sim.dir.ref       <- '/proj/ibrahimlab/strapp_paper3/multi_hypotheses/Sims/pi_01/refprior_indep'
+
+grid.strapp <- get_rej_prob_grid(grid = grid, sim.dir = sim.dir.strapp, prior = 'straPP')
+grid.pp     <- get_rej_prob_grid(grid = grid, sim.dir = sim.dir.pp, prior = 'PP')
+grid.ref    <- get_rej_prob_grid(grid = grid, sim.dir = sim.dir.ref, prior = 'Reference')
+
+df.pi01                   <- rbind(grid.strapp, grid.pp, grid.ref)
+df.pi01$prob_rej_high     <- as.numeric(df.pi01$prob_rej_high)
+df.pi01$prob_rej_low      <- as.numeric(df.pi01$prob_rej_low)
+df.pi01$prob_rej_low_high <- as.numeric(df.pi01$prob_rej_low_high)
+
+# for refprior under pi_{01}
+avg_events_per_n1 <- readRDS("/proj/ibrahimlab/strapp_paper3/multi_hypotheses/R/avg_events_per_n1/refprior_pi01.rds")
+avg_events_per_n1 <- round(avg_events_per_n1)
+
+# ae = avg_events
+for(i in 1:nrow(df.pi01)){
+  df.pi01$x_label[i] <- paste0('n = ', df.pi01$n1[i], '\nae = ', avg_events_per_n1[which(n1 == df.pi01$n1[i])])
+}
+```
+
+
+# Under pi_00
+
+## Obtain Rejection Probability of Low-Dose/High-Dose Effect
+
+under $\pi_{00}^{(s)}$
+
+```{r}
+n1 <- seq(550, 750, by = 20)
+n1 <- c(n1, 1000, 1500, 2000)
+n1 <- as.integer(n1)
+
+a0 <- c(0.2, 0.8)
+grid <- expand.grid(
+  n1 = n1,
+  a0 = a0,
+  stringsAsFactors = FALSE
+)
+
+sim.dir.strapp    <- '/proj/ibrahimlab/strapp_paper3/multi_hypotheses/Sims/pi_00/strapp'
+sim.dir.pp        <- '/proj/ibrahimlab/strapp_paper3/multi_hypotheses/Sims/pi_00/pp'
+sim.dir.ref       <- '/proj/ibrahimlab/strapp_paper3/multi_hypotheses/Sims/pi_00/refprior_indep'
+
+grid.strapp <- get_rej_prob_grid(grid = grid, sim.dir = sim.dir.strapp, prior = 'straPP')
+grid.pp     <- get_rej_prob_grid(grid = grid, sim.dir = sim.dir.pp, prior = 'PP')
+grid.ref    <- get_rej_prob_grid(grid = grid, sim.dir = sim.dir.ref, prior = 'Reference')
+
+df.pi00                   <- rbind(grid.strapp, grid.pp, grid.ref)
+df.pi00$prob_rej_high     <- as.numeric(df.pi00$prob_rej_high)
+df.pi00$prob_rej_low      <- as.numeric(df.pi00$prob_rej_low)
+df.pi00$prob_rej_low_high <- as.numeric(df.pi00$prob_rej_low_high)
+
+# for refprior under pi_{01}
+avg_events_per_n1 <- readRDS("/proj/ibrahimlab/strapp_paper3/multi_hypotheses/R/avg_events_per_n1/refprior_pi00.rds")
+avg_events_per_n1 <- round(avg_events_per_n1)
+
+# ae = avg_events
+for(i in 1:nrow(df.pi00)){
+  df.pi00$x_label[i] <- paste0('n = ', df.pi00$n1[i], '\nae = ', avg_events_per_n1[which(n1 == df.pi00$n1[i])])
+}
+```
+
+
+# Some Plots/Tables
+
+```{r}
+plt_power_by_a0 <- function(df, a0_val, dose, yrange=c(0, 1), yname = 'power'){
+  if (dose == 'low'){
+    df %>% 
+      filter(a0 == a0_val) %>%
+      ggplot(aes(x = n1, y = prob_rej_low_high, linetype = prior, shape = prior, color = prior)) +
+      ylim(yrange[1], yrange[2]) +
+      labs(y = paste0(yname, " for low-dose"), x = "", subtitle = paste0('a0 = ', a0_val)) +
+      geom_point() +
+      geom_smooth(se = FALSE) +
+      scale_x_continuous(breaks = df$n1, labels = df$x_label)
+  } else if (dose == 'high'){
+    df %>% 
+      filter(a0 == a0_val) %>%
+      ggplot(aes(x = n1, y = prob_rej_high, linetype = prior, shape = prior, color = prior)) +
+      ylim(yrange[1], yrange[2]) +
+      labs(y = paste0(yname, " for high-dose"), x = "", subtitle = paste0('a0 = ', a0_val)) +
+      geom_point() +
+      geom_smooth(se = FALSE) +
+      scale_x_continuous(breaks = df$n1, labels = df$x_label)
+  }
+}
+```
+
+
+```{r}
+p11 = plt_power_by_a0(df.pi11 %>% filter(n1 <= 750), 0.2, 'low')
+p12 = plt_power_by_a0(df.pi11 %>% filter(n1 > 750), 0.2, 'low')
+p21 = plt_power_by_a0(df.pi11 %>% filter(n1 <= 750), 0.2, 'high')
+p22 = plt_power_by_a0(df.pi11 %>% filter(n1 > 750), 0.2, 'high')
+p31 = plt_power_by_a0(df.pi11 %>% filter(n1 <= 750), 0.8, 'low')
+p32 = plt_power_by_a0(df.pi11 %>% filter(n1 > 750), 0.8, 'low')
+p41 = plt_power_by_a0(df.pi11 %>% filter(n1 <= 750), 0.8, 'high')
+p42 = plt_power_by_a0(df.pi11 %>% filter(n1 > 750), 0.8, 'high')
+
+plts_low = ggarrange(p11, p12, p31, p32, 
+          ncol = 2,nrow = 2,
+          common.legend = TRUE, legend = "bottom")
+annotate_figure(plts_low, top = text_grob("Under Non-Null Low-Dose and High-Dose Effects", 
+               face = "bold", size = 14))
+
+plts_high = ggarrange(p21, p22, p41, p42, 
+          ncol = 2,nrow = 2,
+          common.legend = TRUE, legend = "bottom")
+annotate_figure(plts_high, top = text_grob("Under Non-Null Low-Dose and High-Dose Effects", 
+               face = "bold", size = 14))
+```
+
+
+```{r}
+library(tidyr)
+df.pi11.long <- df.pi11 %>%
+  pivot_longer(
+    cols = starts_with("prob_rej"),
+    names_to = "type",
+    values_to = ".value"
+  )
+colnames(df.pi11.long)[6] <- 'rejection_prob'
+
+df.pi11.long %>% 
+      filter(a0 == 0.2) %>%
+      ggplot(aes(x = n1, y = rejection_prob, linetype = type, shape = type, color = type)) +
+      ylim(0.16, 1) +
+      labs(y = "Probability of Rejection", x = "", subtitle = paste0('a0 = ', 0.2)) +
+      geom_point() +
+      geom_smooth(se = FALSE) +
+      facet_wrap(~prior)
+
+df.pi11.long %>% 
+      filter(a0 == 0.8) %>%
+      ggplot(aes(x = n1, y = rejection_prob, linetype = type, shape = type, color = type)) +
+      ylim(0.16, 1) +
+      labs(y = "Probability of Rejection", x = "", subtitle = paste0('a0 = ', 0.8)) +
+      geom_point() +
+      geom_smooth(se = FALSE) +
+      facet_wrap(~prior)
+```
+
+
+```{r}
+p11_01 = plt_power_by_a0(df.pi01 %>% filter(n1 <= 750), 0.2, 'low', yname = 'Type I Error', yrange = c(0, 0.25))
+p12_01 = plt_power_by_a0(df.pi01 %>% filter(n1 > 750), 0.2, 'low', yname = 'Type I Error', yrange = c(0, 0.25))
+p31_01 = plt_power_by_a0(df.pi01 %>% filter(n1 <= 750), 0.8, 'low', yname = 'Type I Error', yrange = c(0, 0.25))
+p32_01 = plt_power_by_a0(df.pi01 %>% filter(n1 > 750), 0.8, 'low', yname = 'Type I Error', yrange = c(0, 0.25))
+
+p21_01 = plt_power_by_a0(df.pi01 %>% filter(n1 <= 750), 0.2, 'high')
+p22_01 = plt_power_by_a0(df.pi01 %>% filter(n1 > 750), 0.2, 'high')
+p41_01 = plt_power_by_a0(df.pi01 %>% filter(n1 <= 750), 0.8, 'high')
+p42_01 = plt_power_by_a0(df.pi01 %>% filter(n1 > 750), 0.8, 'high')
+
+plts_low_01 = ggarrange(p11_01, p12_01, p31_01, p32_01, 
+          ncol = 2,nrow = 2,
+          common.legend = TRUE, legend = "bottom")
+annotate_figure(plts_low_01, top = text_grob("Under Null Low-Dose and Non-Null High-Dose Effects", 
+               face = "bold", size = 14))
+
+plts_high_01 = ggarrange(p21_01, p22_01, p41_01, p42_01, 
+          ncol = 2,nrow = 2,
+          common.legend = TRUE, legend = "bottom")
+annotate_figure(plts_high_01, top = text_grob("Under Null Low-Dose and Non-Null High-Dose Effects", 
+               face = "bold", size = 14))
+```
+
+
+```{r}
+p11_00 = plt_power_by_a0(df.pi00 %>% filter(n1 <= 750), 0.2, 'low', yname = 'Type I Error', yrange = c(0, 0.2))
+p12_00 = plt_power_by_a0(df.pi00 %>% filter(n1 > 750), 0.2, 'low', yname = 'Type I Error', yrange = c(0, 0.2))
+p31_00 = plt_power_by_a0(df.pi00 %>% filter(n1 <= 750), 0.8, 'low', yname = 'Type I Error', yrange = c(0, 0.2))
+p32_00 = plt_power_by_a0(df.pi00 %>% filter(n1 > 750), 0.8, 'low', yname = 'Type I Error', yrange = c(0, 0.2))
+
+p21_00 = plt_power_by_a0(df.pi00 %>% filter(n1 <= 750), 0.2, 'high', yname = 'Type I Error', yrange = c(0, 0.2))
+p22_00 = plt_power_by_a0(df.pi00 %>% filter(n1 > 750), 0.2, 'high', yname = 'Type I Error', yrange = c(0, 0.2))
+p41_00 = plt_power_by_a0(df.pi00 %>% filter(n1 <= 750), 0.8, 'high', yname = 'Type I Error', yrange = c(0, 0.2))
+p42_00 = plt_power_by_a0(df.pi00 %>% filter(n1 > 750), 0.8, 'high', yname = 'Type I Error', yrange = c(0, 0.2))
+
+plts_low_00 = ggarrange(p11_00, p12_00, p31_00, p32_00, 
+          ncol = 2,nrow = 2,
+          common.legend = TRUE, legend = "bottom")
+annotate_figure(plts_low_00, top = text_grob("Under Null Low-Dose and Null High-Dose Effects", 
+               face = "bold", size = 14))
+
+plts_high_00 = ggarrange(p21_00, p22_00, p41_00, p42_00, 
+          ncol = 2,nrow = 2,
+          common.legend = TRUE, legend = "bottom")
+annotate_figure(plts_high_00, top = text_grob("Under Null Low-Dose and Null High-Dose Effects", 
+               face = "bold", size = 14))
+```
+
+## Create combined plots of power and type I error rate
+
+```{r}
+library(latex2exp)
+
+plt_power_by_a0 <- function(df, a0_val, dose, xname, yrange=c(0.25, 1)){
+  if (dose == 'low'){
+    df %>% 
+      filter(a0 == a0_val) %>%
+      ggplot(aes(x = n1, y = prob_rej_low_high, linetype = prior, shape = prior, color = prior)) +
+      ylim(yrange[1], yrange[2]) +
+      labs(y = '', x = xname) +
+      geom_point() +
+      geom_smooth(se = FALSE) +
+      scale_x_continuous(breaks = df$n1, labels = df$x_label) +
+      theme(legend.position = "none")
+  } else if (dose == 'high'){
+    df %>% 
+      filter(a0 == a0_val) %>%
+      ggplot(aes(x = n1, y = prob_rej_high, linetype = prior, shape = prior, color = prior)) +
+      ylim(yrange[1], yrange[2]) +
+      labs(y = '', x = xname) +
+      geom_point() +
+      geom_smooth(se = FALSE) +
+      scale_x_continuous(breaks = df$n1, labels = df$x_label) +
+      theme(legend.position = "none")
+  }
+}
+
+pa_11 = df.pi11 %>% filter(n1 > 750) %>% 
+  filter(a0 == 0.2) %>%
+  ggplot(aes(x = n1, y = prob_rej_low_high, linetype = prior, shape = prior, color = prior)) +
+  ylim(0.25, 1) +
+  labs(y = '', x = '(i)', tag = TeX("$a_0 = 0.2$")) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = (df.pi11 %>% filter(n1 > 750))$n1,
+                               labels = (df.pi11 %>% filter(n1 > 750))$x_label) +
+  theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+
+pa_12 = plt_power_by_a0(df.pi11 %>% filter(n1 > 750), 0.2, 'high', '(iii)')
+pa_21 = df.pi11 %>% filter(n1 > 750) %>% 
+  filter(a0 == 0.8) %>%
+  ggplot(aes(x = n1, y = prob_rej_low_high, linetype = prior, shape = prior, color = prior)) +
+  ylim(0.25, 1) +
+  labs(y = '', x = '(ii)', tag = TeX("$a_0 = 0.8$")) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = (df.pi11 %>% filter(n1 > 750))$n1,
+                               labels = (df.pi11 %>% filter(n1 > 750))$x_label) +
+  theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+pa_22 = plt_power_by_a0(df.pi11 %>% filter(n1 > 750), 0.8, 'high', '(iv)')
+
+pb_11 = df.pi01 %>% filter(n1 > 750) %>% 
+  filter(a0 == 0.2) %>%
+  ggplot(aes(x = n1, y = prob_rej_low_high, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.18) +
+  labs(y = '', x = '(i)', tag = TeX("$a_0 = 0.2$")) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = (df.pi01 %>% filter(n1 > 750))$n1,
+                               labels = (df.pi01 %>% filter(n1 > 750))$x_label) +
+  theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+
+pb_12 = plt_power_by_a0(df.pi01 %>% filter(n1 > 750), 0.2, 'high', '(iii)')
+pb_21 = df.pi01 %>% filter(n1 > 750) %>% 
+  filter(a0 == 0.8) %>%
+  ggplot(aes(x = n1, y = prob_rej_low_high, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.18) +
+  labs(y = '', x = '(ii)', tag = TeX("$a_0 = 0.8$")) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = (df.pi01 %>% filter(n1 > 750))$n1,
+                               labels = (df.pi01 %>% filter(n1 > 750))$x_label) +
+  theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+pb_22 = plt_power_by_a0(df.pi01 %>% filter(n1 > 750), 0.8, 'high', '(iv)')
+
+pc_11 = df.pi00 %>% filter(n1 > 750) %>% 
+  filter(a0 == 0.2) %>%
+  ggplot(aes(x = n1, y = prob_rej_low_high, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.18) +
+  labs(y = '', x = '(i)', tag = TeX("$a_0 = 0.2$")) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = (df.pi00 %>% filter(n1 > 750))$n1,
+                               labels = (df.pi00 %>% filter(n1 > 750))$x_label) +
+  theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+
+pc_12 = plt_power_by_a0(df.pi00 %>% filter(n1 > 750), 0.2, 'high', '(iii)', c(0, 0.18))
+pc_21 = df.pi00 %>% filter(n1 > 750) %>% 
+  filter(a0 == 0.8) %>%
+  ggplot(aes(x = n1, y = prob_rej_low_high, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.18) +
+  labs(y = '', x = '(ii)', tag = TeX("$a_0 = 0.8$")) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = (df.pi00 %>% filter(n1 > 750))$n1,
+                               labels = (df.pi00 %>% filter(n1 > 750))$x_label) +
+  theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+pc_22 = plt_power_by_a0(df.pi00 %>% filter(n1 > 750), 0.8, 'high',  '(iv)', c(0, 0.18))
+
+# function to extract legend from plot
+get_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)
+}
+# p11 with legend
+p11_legend <- df.pi11 %>% 
+  filter(a0 == 0.2) %>%
+  ggplot(aes(x = n1, y = prob_rej_low_high, linetype = prior, shape = prior, color = prior)) +
+  ylim(0.25, 1) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.pi11$n1, labels = df.pi11$x_label) +
+  theme(legend.position = "bottom", legend.text=element_text(size=10),
+        legend.key.width= unit(2, 'cm'))
+
+# extract legend from plot1 using above function
+legend <- get_legend(p11_legend) 
+
+#row.titles = paste0('a0 = ', c(0.2, 0.8))
+#combine_plots <- function(p11, p12, p21, p22, legend = legend){
+#  pl = list(p11, p21, p12, p22)
+  # Add row titles
+#  pl[1:2] = lapply(1:2, function(i) arrangeGrob(pl[[i]], 
+#                                                left=row.titles[i]
+                                                #left = text_grob(row.titles[i], size = 10, face = "bold")
+#  )
+#  )
+#  return(pl)
+#}
+
+col.titles = c("Power for Low-Dose", "Power for High-Dose")
+#pla = combine_plots(pa_11, pa_12, pa_21, pa_22)
+pla = list(pa_11, pa_21, pa_12, pa_22)
+res_a = grid.arrange(grobs = lapply(c(1, 3), function(i) {
+  arrangeGrob(grobs=pla[i:(i+1)], 
+              top=col.titles[i/2 + 1],
+              #top=text_grob(col.titles[i/4 + 1], size = 10, face = "bold"),
+              ncol=1)
+}), #bottom = legend,
+ncol=2)
+res_a = annotate_figure(res_a, top = text_grob(TeX("Under $\\pi_{11}^{(s)}$"), 
+                                           size = 12))
+
+col.titles = c("Type I Error Rate for Low-Dose", "Power for High-Dose")
+#plb = combine_plots(pb_11, pb_12, pb_21, pb_22)
+plb = list(pb_11, pb_21, pb_12, pb_22)
+res_b = grid.arrange(grobs = lapply(c(1, 3), function(i) {
+  arrangeGrob(grobs=plb[i:(i+1)], 
+              top=col.titles[i/2 + 1],
+              #top=text_grob(col.titles[i/4 + 1], size = 10, face = "bold"),
+              ncol=1)
+}), #bottom = legend,
+ncol=2)
+res_b = annotate_figure(res_b, top = text_grob(TeX("Under $\\pi_{0 1}^{(s)}$"), 
+                                               size = 12))
+
+col.titles = c("Type I Error Rate for Low-Dose", "Type I Error Rate for High-Dose")
+plc = list(pc_11, pc_21, pc_12, pc_22)
+res_c = grid.arrange(grobs = lapply(c(1, 3), function(i) {
+  arrangeGrob(grobs=plc[i:(i+1)], 
+              top=col.titles[i/2 + 1],
+              #top=text_grob(col.titles[i/4 + 1], size = 10, face = "bold"),
+              ncol=1)
+}), bottom = legend, ncol=2)
+res_c = annotate_figure(res_c, top = text_grob(TeX("Under $\\pi_{0 0}^{(s)}$"), 
+                                               size = 12))
+
+#ggarrange(ggarrange(res_a, res_b, ncol = 2, labels = c("(a)", "(b)")),                                              # First row 
+#          res_c, # Second row with box and dot plots
+#          nrow = 2, 
+#          labels = "(c)"
+          
+#) 
+
+plts = ggarrange(res_a, res_b, res_c, nrow = 3, ncol = 1, labels = c("(a)", "(b)", "(c)"))
+annotate_figure(plts, top = text_grob(TeX("Power and Type I Error Rate for Various $(a_0, n)$", bold = T), size = 14))
+#width: 1000, height: 1200
+```
+
+
+## Create combined plots for MSE
+
+```{r}
+plt_mse_by_a0 <- function(df, a0_val, dose, xname, yrange=c(0, 0.1)){
+  if (dose == 'low'){
+    df %>% 
+      filter(a0 == a0_val) %>%
+      ggplot(aes(x = n1, y = MSE_LD, linetype = prior, shape = prior, color = prior)) +
+      ylim(yrange[1], yrange[2]) +
+      labs(y = '', x = xname) +
+      geom_point() +
+      geom_smooth(se = FALSE) +
+      scale_x_continuous(breaks = df$n1, labels = df$x_label) +
+      theme(legend.position = "none")
+  } else if (dose == 'high'){
+    df %>% 
+      filter(a0 == a0_val) %>%
+      ggplot(aes(x = n1, y = MSE_HD, linetype = prior, shape = prior, color = prior)) +
+      ylim(yrange[1], yrange[2]) +
+      labs(y = '', x = xname) +
+      geom_point() +
+      geom_smooth(se = FALSE) +
+      scale_x_continuous(breaks = df$n1, labels = df$x_label) +
+      theme(legend.position = "none")
+  }
+}
+
+pa_11 = df.pi11 %>% filter(n1 > 750) %>% 
+      filter(a0 == 0.2) %>%
+      ggplot(aes(x = n1, y = MSE_LD, linetype = prior, shape = prior, color = prior)) +
+      ylim(0, 0.1) +
+      labs(y = '', x = '(i)', tag = TeX("$a_0 = 0.2$")) +
+      geom_point() +
+      geom_smooth(se = FALSE) +
+      scale_x_continuous(breaks = (df.pi11 %>% filter(n1 > 750))$n1,
+                         labels = (df.pi11 %>% filter(n1 > 750))$x_label) +
+      theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+
+pa_12 = plt_mse_by_a0(df.pi11 %>% filter(n1 > 750), 0.2, 'high', '(iii)')
+pa_21 = df.pi11 %>% filter(n1 > 750) %>% 
+      filter(a0 == 0.8) %>%
+      ggplot(aes(x = n1, y = MSE_LD, linetype = prior, shape = prior, color = prior)) +
+      ylim(0, 0.1) +
+      labs(y = '', x = '(ii)', tag = TeX("$a_0 = 0.8$")) +
+      geom_point() +
+      geom_smooth(se = FALSE) +
+      scale_x_continuous(breaks = (df.pi11 %>% filter(n1 > 750))$n1,
+                         labels = (df.pi11 %>% filter(n1 > 750))$x_label) +
+      theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+pa_22 = plt_mse_by_a0(df.pi11 %>% filter(n1 > 750), 0.8, 'high', '(iv)')
+
+pb_11 = df.pi01 %>% filter(n1 > 750) %>% 
+      filter(a0 == 0.2) %>%
+      ggplot(aes(x = n1, y = MSE_LD, linetype = prior, shape = prior, color = prior)) +
+      ylim(0, 0.1) +
+      labs(y = '', x = '(i)', tag = TeX("$a_0 = 0.2$")) +
+      geom_point() +
+      geom_smooth(se = FALSE) +
+      scale_x_continuous(breaks = (df.pi01 %>% filter(n1 > 750))$n1,
+                         labels = (df.pi01 %>% filter(n1 > 750))$x_label) +
+      theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+
+pb_12 = plt_mse_by_a0(df.pi01 %>% filter(n1 > 750), 0.2, 'high', '(iii)')
+pb_21 = df.pi01 %>% filter(n1 > 750) %>% 
+      filter(a0 == 0.8) %>%
+      ggplot(aes(x = n1, y = MSE_LD, linetype = prior, shape = prior, color = prior)) +
+      ylim(0, 0.1) +
+      labs(y = '', x = '(ii)', tag = TeX("$a_0 = 0.8$")) +
+      geom_point() +
+      geom_smooth(se = FALSE) +
+      scale_x_continuous(breaks = (df.pi01 %>% filter(n1 > 750))$n1,
+                         labels = (df.pi01 %>% filter(n1 > 750))$x_label) +
+      theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+pb_22 = plt_mse_by_a0(df.pi01 %>% filter(n1 > 750), 0.8, 'high', '(iv)')
+
+pc_11 = df.pi00 %>% filter(n1 > 750) %>% 
+      filter(a0 == 0.2) %>%
+      ggplot(aes(x = n1, y = MSE_LD, linetype = prior, shape = prior, color = prior)) +
+      ylim(0, 0.1) +
+      labs(y = '', x = '(i)', tag = TeX("$a_0 = 0.2$")) +
+      geom_point() +
+      geom_smooth(se = FALSE) +
+      scale_x_continuous(breaks = (df.pi00 %>% filter(n1 > 750))$n1,
+                         labels = (df.pi00 %>% filter(n1 > 750))$x_label) +
+      theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+
+pc_12 = plt_mse_by_a0(df.pi00 %>% filter(n1 > 750), 0.2, 'high', '(iii)')
+pc_21 = df.pi00 %>% filter(n1 > 750) %>% 
+      filter(a0 == 0.8) %>%
+      ggplot(aes(x = n1, y = MSE_LD, linetype = prior, shape = prior, color = prior)) +
+      ylim(0, 0.1) +
+      labs(y = '', x = '(ii)', tag = TeX("$a_0 = 0.8$")) +
+      geom_point() +
+      geom_smooth(se = FALSE) +
+      scale_x_continuous(breaks = (df.pi00 %>% filter(n1 > 750))$n1,
+                         labels = (df.pi00 %>% filter(n1 > 750))$x_label) +
+      theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+
+pc_22 = plt_mse_by_a0(df.pi00 %>% filter(n1 > 750), 0.8, 'high',  '(iv)')
+
+# function to extract legend from plot
+get_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)
+}
+# p11 with legend
+p11_legend <- df.pi11 %>% 
+  filter(a0 == 0.2) %>%
+  ggplot(aes(x = n1, y = MSE_LD, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.1) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.pi11$n1, labels = df.pi11$x_label) +
+  theme(legend.position = "bottom", legend.text=element_text(size=10),
+        legend.key.width= unit(2, 'cm'))
+
+# extract legend from plot1 using above function
+legend <- get_legend(p11_legend) 
+
+col.titles = c("MSE for Low-Dose", "MSE for High-Dose")
+pla = list(pa_11, pa_21, pa_12, pa_22)
+res_a = grid.arrange(grobs = lapply(c(1, 3), function(i) {
+  arrangeGrob(grobs=pla[i:(i+1)], 
+              top=col.titles[i/2 + 1],
+              #top=text_grob(col.titles[i/4 + 1], size = 10, face = "bold"),
+              ncol=1)
+}), ncol=2)
+res_a = annotate_figure(res_a, top = text_grob(TeX("MSE under $\\pi_{11}^{(s)}$"), 
+                                           size = 12))
+
+plb = list(pb_11, pb_21, pb_12, pb_22)
+res_b = grid.arrange(grobs = lapply(c(1, 3), function(i) {
+  arrangeGrob(grobs=plb[i:(i+1)], 
+              top=col.titles[i/2 + 1],
+              #top=text_grob(col.titles[i/4 + 1], size = 10, face = "bold"),
+              ncol=1)
+}), ncol=2)
+res_b = annotate_figure(res_b, top = text_grob(TeX("MSE under $\\pi_{0 1}^{(s)}$"), 
+                                               size = 12))
+
+plc = list(pc_11, pc_21, pc_12, pc_22)
+res_c = grid.arrange(grobs = lapply(c(1, 3), function(i) {
+  arrangeGrob(grobs=plc[i:(i+1)], 
+              top=col.titles[i/2 + 1],
+              #top=text_grob(col.titles[i/4 + 1], size = 10, face = "bold"),
+              ncol=1)
+}), bottom = legend, ncol=2)
+res_c = annotate_figure(res_c, top = text_grob(TeX("MSE under $\\pi_{0 0}^{(s)}$"), 
+                                               size = 12))
+
+plts = ggarrange(res_a, res_b, res_c, nrow = 3, ncol = 1, labels = c("(a)", "(b)", "(c)"))
+annotate_figure(plts, top = text_grob(TeX("MSE under Different Sampling Priors", bold = T), size = 14))
+#width: 1000, height: 1200
+```
+
+
+# Histogram of Posterior Probabilities for Treatment-Only Model under pi01 (n1 = 10000)
+
+```{r}
+# Treatment-Only Model under pi_{01}, n1 = 10000, refprior
+get_post_prob_ref <- function(sim.dir, n1){
+  files   <- list.files(path = sim.dir, pattern = '.rds')
+  idx     <- grepl(pattern = paste0('_n1_', n1, '_refprior_'), files)
+  files   <- files[idx]
+  
+  post_prob_betaLD = c()
+  post_prob_betaHD = c()
+  for (i in seq_len(length(files))) {
+    simres <- readRDS(file.path(sim.dir, files[i]))$simres
+    post_prob_betaLD =c(post_prob_betaLD,
+                 as.numeric(unlist(simres %>% filter(variable == 'beta[1]') %>% select('post_prob')))
+    ) 
+    post_prob_betaHD =c(post_prob_betaHD,
+                        as.numeric(unlist(simres %>% filter(variable == 'beta[2]') %>% select('post_prob')))
+    )
+  }
+  return(list(post_prob_betaLD = post_prob_betaLD, post_prob_betaHD = post_prob_betaHD))
+}
+
+sim.dir <- '/pine/scr/x/i/xinxinc/strapp_paper3/multi_hypo/sims_test/refprior/check_type_I_err/n1_10000_pi01'
+post_prob_n1_10000 <- get_post_prob_ref(sim.dir, n1 = 10000)
+ind_low  <- as.numeric(post_prob_n1_10000$post_prob_betaLD > 0.975) 
+ind_high <- as.numeric(post_prob_n1_10000$post_prob_betaHD > 0.975)
+mean(ind_low * ind_high) # 0.0664
+
+df <- data.frame('post_prob_betaLD' = (post_prob_n1_10000$post_prob_betaLD))
+
+ggplot(df, aes(x=post_prob_betaLD)) + 
+  labs(x = 'posterior probability of beta_LD < 0')+
+  geom_histogram(aes(y=..density..), colour="black", fill="white")+
+  geom_density(alpha=.2, color = 'red')
+```
+

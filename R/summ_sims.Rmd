@@ -1,0 +1,844 @@
+---
+title: "summ_sims"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+remove(list = ls())
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(gridExtra)
+library(latex2exp)
+
+res.beta.strapp <- readRDS(file = '/proj/ibrahimlab/strapp_paper3/R/res_beta_strapp.rds')
+beta.strapp     <- res.beta.strapp$beta.strapp
+#var_names = c('beta[1]', 'beta[2]', 'beta[3]', 'beta[4]') # covariate names in simres
+```
+
+
+```{r}
+# compute posterior probabilities of beta < 0
+get_post_prob <- function(n1, a0, sim.dir){
+  files   <- list.files(path = sim.dir, pattern = '.rds')
+  if (a0 == 0){ # a0 = 0 for the reference prior
+    idx     <- grepl(pattern = paste0('_n1_', n1, '_refprior_'), files)
+    files   <- files[idx]
+  } else{
+    idx     <- grepl(pattern = paste0('_n1_', n1, '_a0_', a0), files)
+    files   <- files[idx]
+  }
+  
+  post_prob = c()
+  for (i in seq_len(length(files))) {
+    simres <- readRDS(file.path(sim.dir, files[i]))$simres
+    post_prob =c(post_prob,
+                 as.numeric(unlist(simres %>% filter(variable == 'beta[1]') %>% select('post_prob')))
+    )
+  }
+  
+  return(post_prob)
+}
+
+# get mean posterior probability of rejection 
+# reject if the posterior probability of beta_trt < 0 is > q, where
+# q is the evidence threshold for each data set based on the empirical distribution of the posterior probability under H0
+# q = the 97.5th quantile of the empirical sampling distribution of \int Pr(log HR < 0 | D, H0) f(D | H0)
+get_rej_prob <- function(n1, a0, sim.dir, q){
+  post_prob = get_post_prob(n1, a0, sim.dir)
+  return(mean(post_prob > q))
+}
+
+get_MSE_trt <- function(beta_true, n1, a0, sim.dir){
+  files   <- list.files(path = sim.dir, pattern = '.rds')
+  if (a0 == 0){ # a0 = 0 for the reference prior
+    idx     <- grepl(pattern = paste0('_n1_', n1, '_refprior_'), files)
+    files   <- files[idx]
+  } else{
+    idx     <- grepl(pattern = paste0('_n1_', n1, '_a0_', a0), files)
+    files   <- files[idx]
+  }
+  
+  MSE = c()
+  for (i in seq_len(length(files))) {
+    simres <- readRDS(file.path(sim.dir, files[i]))$simres
+    simres <- simres %>% filter(variable == 'beta[1]') %>% mutate(mse = (post_mean - beta_true[1])^2)
+    MSE =c(MSE, as.numeric(unlist(simres %>% select('mse')))
+    )
+  }
+  
+  mean(MSE) 
+  
+}
+```
+
+
+# Obtain the Evidence Threshold
+
+```{r}
+# q = the 97.5th quantile of the empirical sampling distribution of \int Pr(log HR < 0 | D, H0) f(D | H0)
+n1      <- seq(550, 750, by = 20)
+q1_list <- sapply(n1, function(x){
+  post_prob = get_post_prob(n1 = x, a0 = 0, sim.dir = '/proj/ibrahimlab/strapp_paper3/Sims/H0/refprior')
+  as.numeric(quantile(post_prob, prob = 0.975))
+})
+names(q1_list) <- paste0('n1 = ', n1)
+```
+
+
+
+# Obtain Power and MSE for Treatment Effect (under H1)
+
+```{r}
+n1 <- seq(550, 750, by = 20)
+a0 <- c(0.2, 0.4, 0.6, 0.8)
+grid <- expand.grid(
+  n1 = n1,
+  a0 = a0,
+  stringsAsFactors = FALSE
+)
+
+sim.dir.strapp    <- '/proj/ibrahimlab/strapp_paper3/Sims/H1/strapp'
+sim.dir.genstrapp <- '/proj/ibrahimlab/strapp_paper3/Sims/H1/genstrapp'
+sim.dir.pp        <- '/proj/ibrahimlab/strapp_paper3/Sims/H1/power_prior'
+sim.dir.ref       <- '/proj/ibrahimlab/strapp_paper3/Sims/H1/refprior'
+
+power.strapp      <- apply(grid, 1, function(r){get_rej_prob(n1 = r[1], a0 = r[2], sim.dir = sim.dir.strapp, q = q1_list[paste0('n1 = ', r[1])])})
+mse.strapp        <- apply(grid, 1, function(r){get_MSE_trt(beta_true = beta.strapp, n1 = r[1], a0 = r[2], sim.dir = sim.dir.strapp)})     
+grid.strapp       <- grid
+grid.strapp$power <- power.strapp
+grid.strapp$mse   <- mse.strapp
+grid.strapp$prior <- 'straPP'
+
+power.genstrapp      <- apply(grid, 1, function(r){get_rej_prob(n1 = r[1], a0 = r[2], sim.dir = sim.dir.genstrapp, q = q1_list[paste0('n1 = ', r[1])])})
+mse.genstrapp        <- apply(grid, 1, function(r){get_MSE_trt(beta_true = beta.strapp, n1 = r[1], a0 = r[2], sim.dir = sim.dir.genstrapp)})     
+grid.genstrapp       <- grid
+grid.genstrapp$power <- power.genstrapp
+grid.genstrapp$mse   <- mse.genstrapp
+grid.genstrapp$prior <- 'Gen-straPP'
+
+power.pp      <- apply(grid, 1, function(r){get_rej_prob(n1 = r[1], a0 = r[2], sim.dir = sim.dir.pp, q = q1_list[paste0('n1 = ', r[1])])})
+mse.pp        <- apply(grid, 1, function(r){get_MSE_trt(beta_true = beta.strapp, n1 = r[1], a0 = r[2], sim.dir = sim.dir.pp)})
+grid.pp       <- grid
+grid.pp$power <- power.pp
+grid.pp$mse   <- mse.pp
+grid.pp$prior <- 'PP'
+
+power.ref      <- apply(grid, 1, function(r){get_rej_prob(n1 = r[1], a0 = 0, sim.dir = sim.dir.ref, q = q1_list[paste0('n1 = ', r[1])])})
+mse.ref        <- apply(grid, 1, function(r){get_MSE_trt(beta_true = beta.strapp, n1 = r[1], a0 = 0, sim.dir = sim.dir.ref)})
+grid.ref       <- grid
+grid.ref$power <- power.ref
+grid.ref$mse   <- mse.ref
+grid.ref$prior <- 'Reference'
+
+df.power <- rbind(grid.strapp, grid.genstrapp, grid.pp, grid.ref)
+
+avg_events_per_n1 <- readRDS("/proj/ibrahimlab/strapp_paper3/R/avg_events_per_n1_H1.rds")
+avg_events_per_n1 <- round(avg_events_per_n1)
+
+# ae = avg_events
+for(i in 1:nrow(df.power)){
+  df.power$x_label[i] <- paste0('n = ', df.power$n1[i], '\nae = ', avg_events_per_n1[which(n1 == df.power$n1[i])])
+}
+```
+
+
+# Obtain Type I Error and MSE for Treatment Effect (under H0)
+
+```{r}
+n1 <- seq(550, 750, by = 20)
+a0 <- c(0.2, 0.4, 0.6, 0.8)
+grid <- expand.grid(
+  n1 = n1,
+  a0 = a0,
+  stringsAsFactors = FALSE
+)
+
+sim.dir.strapp    <- '/proj/ibrahimlab/strapp_paper3/Sims/H0/strapp'
+sim.dir.genstrapp <- '/proj/ibrahimlab/strapp_paper3/Sims/H0/genstrapp'
+sim.dir.pp        <- '/proj/ibrahimlab/strapp_paper3/Sims/H0/power_prior'
+sim.dir.ref       <- '/proj/ibrahimlab/strapp_paper3/Sims/H0/refprior'
+
+beta.strapp.null    <- beta.strapp
+beta.strapp.null[1] <- 0
+
+alpha.strapp             <- apply(grid, 1, function(r){get_rej_prob(n1 = r[1], a0 = r[2], sim.dir = sim.dir.strapp, q = q1_list[paste0('n1 = ', r[1])])})
+mse.strapp               <- apply(grid, 1, function(r){get_MSE_trt(beta_true = beta.strapp.null, n1 = r[1], a0 = r[2], sim.dir = sim.dir.strapp)})
+grid.strapp              <- grid
+grid.strapp$type_I_error <- alpha.strapp
+grid.strapp$mse          <- mse.strapp
+grid.strapp$prior        <- 'straPP'
+
+alpha.genstrapp             <- apply(grid, 1, function(r){get_rej_prob(n1 = r[1], a0 = r[2], sim.dir = sim.dir.genstrapp, q = q1_list[paste0('n1 = ', r[1])])})
+mse.genstrapp               <- apply(grid, 1, function(r){get_MSE_trt(beta_true = beta.strapp.null, n1 = r[1], a0 = r[2], sim.dir = sim.dir.genstrapp)})     
+grid.genstrapp              <- grid
+grid.genstrapp$type_I_error <- alpha.genstrapp
+grid.genstrapp$mse          <- mse.genstrapp
+grid.genstrapp$prior        <- 'Gen-straPP'
+
+alpha.pp             <- apply(grid, 1, function(r){get_rej_prob(n1 = r[1], a0 = r[2], sim.dir = sim.dir.pp, q = q1_list[paste0('n1 = ', r[1])])})
+mse.pp               <- apply(grid, 1, function(r){get_MSE_trt(beta_true = beta.strapp.null, n1 = r[1], a0 = r[2], sim.dir = sim.dir.pp)})
+grid.pp              <- grid
+grid.pp$type_I_error <- alpha.pp
+grid.pp$mse          <- mse.pp
+grid.pp$prior        <- 'PP'
+
+alpha.ref             <- apply(grid, 1, function(r){get_rej_prob(n1 = r[1], a0 = 0, sim.dir = sim.dir.ref, q = q1_list[paste0('n1 = ', r[1])])})
+mse.ref               <- apply(grid, 1, function(r){get_MSE_trt(beta_true = beta.strapp.null, n1 = r[1], a0 = 0, sim.dir = sim.dir.ref)})
+grid.ref              <- grid
+grid.ref$type_I_error <- alpha.ref
+grid.ref$mse          <- mse.ref
+grid.ref$prior        <- 'Reference'
+
+df.typeIerr <- rbind(grid.strapp, grid.genstrapp, grid.pp, grid.ref)
+
+avg_events_per_n1 <- readRDS("/proj/ibrahimlab/strapp_paper3/R/avg_events_per_n1_H0.rds")
+avg_events_per_n1 <- round(avg_events_per_n1)
+
+# ae = avg_events
+for(i in 1:nrow(df.typeIerr)){
+  df.typeIerr$x_label[i] <- paste0('n = ', df.typeIerr$n1[i], '\nae = ', avg_events_per_n1[which(n1 == df.typeIerr$n1[i])])
+}
+```
+
+
+# Some Plots/Tables
+
+## Plots by a0
+
+```{r}
+plt_power_by_a0 <- function(df, a0_val){
+  df %>% 
+    filter(a0 == a0_val) %>%
+    ggplot(aes(x = n1, y = power, linetype = prior, shape = prior, color = prior)) +
+    ylim(0.4, 1) +
+    labs(y = "power", x = "", subtitle = paste0('a0 = ', a0_val)) +
+    geom_point() +
+    geom_smooth(se = FALSE) +
+    scale_x_continuous(breaks = df.power$n1, labels = df.power$x_label)
+}
+
+plt_typeIerr_by_a0 <- function(df, a0_val){
+  df %>% 
+    filter(a0 == a0_val) %>%
+    ggplot(aes(x = n1, y = type_I_error, linetype = prior, shape = prior, color = prior)) +
+    ylim(0, 0.2)  +
+    labs(y = "type I error", x = "", subtitle = paste0('a0 = ', a0_val)) +
+    geom_point() +
+    geom_smooth(se = FALSE) +
+    scale_x_continuous(breaks = df.power$n1, labels = df.power$x_label)
+}
+
+# hypothesis = 'Null' or 'Alternative'
+plt_mse_by_a0 <- function(df, a0_val, hypothesis){
+  df %>% 
+    filter(a0 == a0_val) %>%
+    ggplot(aes(x = n1, y = mse, linetype = prior, shape = prior, color = prior)) +
+    ylim(0, 0.05) +
+    labs(y = "MSE", x = "", subtitle = paste0('a0 = ', a0_val, ', under the ', hypothesis)) +
+    geom_point() +
+    geom_smooth(se = FALSE) +
+    scale_x_continuous(breaks = df.power$n1, labels = df.power$x_label)
+}
+```
+
+
+## Create combined plots of power and type I error
+
+```{r}
+# create combined plots of power and type I error
+p11 = df.power %>% 
+  filter(a0 == 0.2) %>%
+  ggplot(aes(x = n1, y = power, linetype = prior, shape = prior, color = prior)) +
+  ylim(0.4, 1) +
+  labs(y = "", x = "(a)"
+       , tag = TeX("$a_0 = 0.2$")
+       #, subtitle = "Power"
+       ) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.power$n1, labels = df.power$x_label) +
+  theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left"
+        #, plot.subtitle=element_text(hjust=0.5, size = 12)
+        )
+
+p21 = df.power %>% 
+  filter(a0 == 0.4) %>%
+  ggplot(aes(x = n1, y = power, linetype = prior, shape = prior, color = prior)) +
+  ylim(0.4, 1) +
+  labs(y = "", x = "(b)"
+       , tag = TeX("$a_0 = 0.4$")) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.power$n1, labels = df.power$x_label) +
+  theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+
+p31 = df.power %>% 
+  filter(a0 == 0.6) %>%
+  ggplot(aes(x = n1, y = power, linetype = prior, shape = prior, color = prior)) +
+  ylim(0.4, 1) +
+  labs(y = "", x = "(c)"
+       , tag = TeX("$a_0 = 0.6$")) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.power$n1, labels = df.power$x_label) +
+  theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+
+p41 = df.power %>% 
+  filter(a0 == 0.8) %>%
+  ggplot(aes(x = n1, y = power, linetype = prior, shape = prior, color = prior)) +
+  ylim(0.4, 1) +
+  labs(y = "", x = "(d)"
+       , tag = TeX("$a_0 = 0.8$")) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.power$n1, labels = df.power$x_label) +
+  theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+
+p12 = df.typeIerr %>% 
+  filter(a0 == 0.2) %>%
+  ggplot(aes(x = n1, y = type_I_error, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.2)  +
+  labs(y = "", x = "(e)") +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.typeIerr$n1, labels = df.typeIerr$x_label) +
+  theme(legend.position = "none")
+
+p22 = df.typeIerr %>% 
+  filter(a0 == 0.4) %>%
+  ggplot(aes(x = n1, y = type_I_error, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.2)  +
+  labs(y = "", x = "(f)") +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.typeIerr$n1, labels = df.typeIerr$x_label) +
+  theme(legend.position = "none")
+  
+p32 = df.typeIerr %>% 
+  filter(a0 == 0.6) %>%
+  ggplot(aes(x = n1, y = type_I_error, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.2)  +
+  labs(y = "", x = "(g)") +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.typeIerr$n1, labels = df.typeIerr$x_label) +
+  theme(legend.position = "none")
+
+p42 = df.typeIerr %>% 
+  filter(a0 == 0.8) %>%
+  ggplot(aes(x = n1, y = type_I_error, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.2)  +
+  labs(y = "", x = "(h)") +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.typeIerr$n1, labels = df.typeIerr$x_label) +
+  theme(legend.position = "none")
+
+#ggarrange(
+#  ggarrange(p11, p12, ncol = 2, labels = c("a0 = 0.2", "")), # First row with line plot
+  # Second row
+#  ggarrange(p21, p22, ncol = 2, labels = c("a0 = 0.4", ""),
+#            common.legend = TRUE, legend = "bottom"), 
+#  nrow = 2
+#) 
+
+pl = list(p11, p21, p31, p41, p12, p22, p32, p42)
+
+# Create row and column titles
+col.titles = c("Power", "Type I Error Rate")
+#row.titles = paste0('a0 = ', c(0.2, 0.4, 0.6, 0.8))
+
+# Add row titles
+#pl[1:4] = lapply(1:4, function(i) arrangeGrob(pl[[i]], 
+#                                              left=row.titles[i]
+                                              #left = text_grob(row.titles[i], size = 10, face = "bold")
+#)
+#)
+
+# function to extract legend from plot
+get_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)
+}
+
+# p11 with legend
+p11_legend <- df.power %>% 
+  filter(a0 == 0.2) %>%
+  ggplot(aes(x = n1, y = power, linetype = prior, shape = prior, color = prior)) +
+  ylim(0.4, 1) +
+  labs(y = "", x = "(a)") +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.power$n1, labels = df.power$x_label) +
+  theme(legend.position = "bottom", legend.text=element_text(size=10),
+        legend.key.width= unit(2, 'cm'))
+
+# extract legend from plot1 using above function
+legend <- get_legend(p11_legend) 
+
+plts = grid.arrange(grobs = lapply(c(1, 5), function(i) {
+  arrangeGrob(grobs=pl[i:(i+3)], 
+              top=col.titles[i/4 + 1],
+              #top=text_grob(col.titles[i/4 + 1], size = 10, face = "bold"),
+              ncol=1)
+}), bottom = legend, ncol=2)
+annotate_figure(plts, top = text_grob(TeX("Power and Type I Error Rate for Various $(a_0, n)$", bold = T), 
+               face = "bold", size = 14))
+#width: 1250, height: 850
+```
+
+
+
+```{r}
+p11 = plt_power_by_a0(df.power, 0.2)
+p12 = plt_typeIerr_by_a0(df.typeIerr, 0.2)
+p21 = plt_power_by_a0(df.power, 0.4)
+p22 = plt_typeIerr_by_a0(df.typeIerr, 0.4)
+p31 = plt_power_by_a0(df.power, 0.6)
+p32 = plt_typeIerr_by_a0(df.typeIerr, 0.6)
+p41 = plt_power_by_a0(df.power, 0.8)
+p42 = plt_typeIerr_by_a0(df.typeIerr, 0.8)
+
+plts = ggarrange(p11, p12, p21, p22, p31, p32, p41, p42, 
+          ncol = 2,nrow = 2,
+          common.legend = TRUE, legend = "bottom")
+
+plts[[1]]
+plts[[2]]
+
+```
+
+
+```{r}
+p11_2 = plt_mse_by_a0(df.power, 0.2, 'Null')
+p12_2 = plt_mse_by_a0(df.typeIerr, 0.2, 'Alternative')
+p21_2 = plt_mse_by_a0(df.power, 0.4, 'Null')
+p22_2 = plt_mse_by_a0(df.typeIerr, 0.4, 'Alternative')
+p31_2 = plt_mse_by_a0(df.power, 0.6, 'Null')
+p32_2 = plt_mse_by_a0(df.typeIerr, 0.6, 'Alternative')
+p41_2 = plt_mse_by_a0(df.power, 0.8, 'Null')
+p42_2 = plt_mse_by_a0(df.typeIerr, 0.8, 'Alternative')
+
+plts_mse = ggarrange(p11_2, p12_2, p21_2, p22_2, p31_2, p32_2, p41_2, p42_2, 
+          ncol = 2,nrow = 2,
+          common.legend = TRUE, legend = "bottom")
+plts_mse[[1]]
+plts_mse[[2]]
+```
+
+## Create combined plots for MSE
+
+```{r}
+p11 = df.power %>% 
+  filter(a0 == 0.2) %>%
+  ggplot(aes(x = n1, y = mse, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.05) +
+  labs(y = "", x = "(a)"
+       , tag = TeX("$a_0 = 0.2$")
+       , subtitle = TeX("MSE under $\\pi_{1}^{(s)}$")) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.power$n1, labels = df.power$x_label) +
+  theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left"
+        , plot.subtitle=element_text(hjust=0.5, size = 12)
+        )
+
+p21 = df.power %>% 
+  filter(a0 == 0.4) %>%
+  ggplot(aes(x = n1, y = mse, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.05) +
+  labs(y = "", x = "(b)"
+       , tag = TeX("$a_0 = 0.4$")) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.power$n1, labels = df.power$x_label) +
+  theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+
+p31 = df.power %>% 
+  filter(a0 == 0.6) %>%
+  ggplot(aes(x = n1, y = mse, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.05) +
+  labs(y = "", x = "(c)"
+       , tag = TeX("$a_0 = 0.6$")) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.power$n1, labels = df.power$x_label) +
+  theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+
+p41 = df.power %>% 
+  filter(a0 == 0.8) %>%
+  ggplot(aes(x = n1, y = mse, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.05) +
+  labs(y = "", x = "(d)"
+       , tag = TeX("$a_0 = 0.8$")) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.power$n1, labels = df.power$x_label) +
+  theme(legend.position = "none"
+        , plot.tag = element_text(angle = 90, size = 12)
+        , plot.tag.position = "left")
+
+p12 = df.typeIerr %>% 
+  filter(a0 == 0.2) %>%
+  ggplot(aes(x = n1, y = mse, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.05) +
+  labs(y = "", x = "(e)"
+       , subtitle = TeX("MSE under $\\pi_{0}^{(s)}$")
+       ) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.typeIerr$n1, labels = df.typeIerr$x_label) +
+  theme(legend.position = "none"
+        , plot.subtitle=element_text(hjust=0.5, size = 12)
+        )
+
+p22 = df.typeIerr %>% 
+  filter(a0 == 0.4) %>%
+  ggplot(aes(x = n1, y = mse, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.05) +
+  labs(y = "", x = "(f)") +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.typeIerr$n1, labels = df.typeIerr$x_label) +
+  theme(legend.position = "none")
+  
+p32 = df.typeIerr %>% 
+  filter(a0 == 0.6) %>%
+  ggplot(aes(x = n1, y = mse, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.05) +
+  labs(y = "", x = "(g)") +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.typeIerr$n1, labels = df.typeIerr$x_label) +
+  theme(legend.position = "none")
+
+p42 = df.typeIerr %>% 
+  filter(a0 == 0.8) %>%
+  ggplot(aes(x = n1, y = mse, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.05) +
+  labs(y = "", x = "(h)") +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.typeIerr$n1, labels = df.typeIerr$x_label) +
+  theme(legend.position = "none")
+
+pl = list(p11, p21, p31, p41, p12, p22, p32, p42)
+
+# Create row and column titles
+#col.titles = c("MSE under the Alternative", "MSE under the Null")
+#row.titles = paste0('a0 = ', c(0.2, 0.4, 0.6, 0.8))
+
+# Add row titles
+#pl[1:4] = lapply(1:4, function(i) arrangeGrob(pl[[i]], 
+#                                              left=row.titles[i]
+                                              #left = text_grob(row.titles[i], size = 10, face = "bold")
+#)
+#)
+
+# function to extract legend from plot
+get_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)
+}
+
+# p11 with legend
+p11_legend <- df.power %>% 
+  filter(a0 == 0.2) %>%
+  ggplot(aes(x = n1, y = mse, linetype = prior, shape = prior, color = prior)) +
+  ylim(0, 0.05) +
+  labs(y = "", x = "(a)") +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = df.power$n1, labels = df.power$x_label) +
+  theme(legend.position = "bottom", legend.text=element_text(size=10),
+        legend.key.width= unit(2, 'cm'))
+
+# extract legend from plot1 using above function
+legend <- get_legend(p11_legend) 
+
+plts = grid.arrange(grobs = lapply(c(1, 5), function(i) {
+  arrangeGrob(grobs=pl[i:(i+3)], 
+#              top=col.titles[i/4 + 1],
+              #top=text_grob(col.titles[i/4 + 1], size = 10, face = "bold"),
+              ncol=1)
+}), bottom = legend, ncol=2)
+annotate_figure(plts, top = text_grob("MSE under Null and Alternative Sampling Prior", 
+               face = "bold", size = 14))
+#width: 1250, height: 850
+```
+
+
+
+# Check Type I Error 
+
+## Case 1
+
+Simulation scenario: implementing reference prior for n1 = 550, number of MCMC sampls = 50000, under H0
+
+```{r}
+sim.dir.list <- c('/proj/ibrahimlab/strapp_paper3/Sims/check_type_I_err_refprior/n1_550_nMCMC_25000', '/proj/ibrahimlab/strapp_paper3/Sims/check_type_I_err_refprior/n1_550_nMCMC_50000', '/proj/ibrahimlab/strapp_paper3/Sims/check_type_I_err_refprior/n1_550_nMCMC_75000', '/proj/ibrahimlab/strapp_paper3/Sims/check_type_I_err_refprior/n1_550_nMCMC_100000')
+
+typeIerr_n1_550 <- sapply(sim.dir.list, get_rej_prob, n1 = 550, a0 = 0)
+typeIerr_n1_550 
+```
+
+
+## Case 2
+
+Simulation scenario: implementing reference prior for n1 = 2000, number of MCMC sampls = 25000, under H0
+
+```{r}
+sim.dir.list2 <- c('/proj/ibrahimlab/strapp_paper3/Sims/check_type_I_err_refprior/n1_2000_nMCMC_25000', '/proj/ibrahimlab/strapp_paper3/Sims/check_type_I_err_refprior/n1_2000_nMCMC_50000', '/proj/ibrahimlab/strapp_paper3/Sims/check_type_I_err_refprior/n1_2000_nMCMC_75000', '/proj/ibrahimlab/strapp_paper3/Sims/check_type_I_err_refprior/n1_2000_nMCMC_100000')
+typeIerr_n1_2000 <- sapply(sim.dir.list2, get_rej_prob, n1 = 2000, a0 = 0)
+typeIerr_n1_2000 
+```
+
+Summary Table of Case 1 and Case 2
+
+```{r}
+tab <- cbind(round(as.numeric(typeIerr_n1_550), 4), round(as.numeric(typeIerr_n1_2000), 4))
+colnames(tab) <- c('n1 = 550', 'n1 = 2000')
+rownames(tab) <- paste0('nMCMC = ', c(25000, 50000, 75000, 100000))
+
+kableExtra::kable(tab)
+```
+
+
+# Histogram of Posterior Probabilities for n1 = 550, 2000
+
+```{r}
+get_post_prob_ref <- function(sim.dir, n1){
+  files   <- list.files(path = sim.dir, pattern = '.rds')
+  idx     <- grepl(pattern = paste0('_n1_', n1, '_refprior_'), files)
+  files   <- files[idx]
+  
+  post_prob = c()
+  for (i in seq_len(length(files))) {
+    simres <- readRDS(file.path(sim.dir, files[i]))$simres
+    post_prob =c(post_prob,
+                 as.numeric(unlist(simres %>% filter(variable == 'beta[1]') %>% select('post_prob')))
+    )
+  }
+  
+  return(post_prob)
+}
+
+#sim.dir1 <- '/pine/scr/x/i/xinxinc/strapp_paper3/sims_test/refprior/check_type_I_err/n1_2000_nMCMC_50000'
+
+sim.dir1 <- '/proj/ibrahimlab/strapp_paper3/Sims/check_type_I_err_refprior/n1_550_nMCMC_25000'
+sim.dir2 <- '/proj/ibrahimlab/strapp_paper3/Sims/check_type_I_err_refprior/n1_2000_nMCMC_25000'
+
+post_prob_n1_2000 <- get_post_prob_ref(sim.dir2, n1 = 2000)
+post_prob_n1_550 <- get_post_prob_ref(sim.dir1, n1 = 550)
+
+df <- data.frame('post_prob' = c(post_prob_n1_550, post_prob_n1_2000), 'n1' = rep(c('n1 = 550', 'n1 = 2000'), each = 10000))
+
+plt_2000_550 = ggplot(df, aes(x=post_prob)) + 
+  labs(x = 'posterior probability under the null', subtitle = 'For Model with All the Covariates')+
+  geom_histogram(aes(y=..density..), colour="black", fill="white")+
+  geom_density(alpha=.2, color = 'red') +
+  #facet_grid(n1 ~ .)
+  facet_grid(~n1)
+
+plt_2000_550
+```
+
+# Histogram of Number of Events for All Covariates
+
+```{r}
+remove(list = ls())
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+
+## source wrappers
+wrapper.dir <- '/proj/ibrahimlab/strapp_paper3/R'
+source(file.path(wrapper.dir, 'wrappers.R'))
+
+seeds_list <- readRDS(file = '/proj/ibrahimlab/strapp_paper3/R/seeds_list.rds')
+
+res.beta.strapp <- readRDS(file = '/proj/ibrahimlab/strapp_paper3/R/res_beta_strapp.rds')
+beta.strapp     <- res.beta.strapp$beta.strapp
+X0              <- res.beta.strapp$X0
+p_cured         <- res.beta.strapp$p_cured
+rm(res.beta.strapp)
+
+get_num_events <- function(n1){
+  num_events = vector(length = length(seeds_list))
+  
+  for (i in seq_len(length(seeds_list))) {
+    set.seed(seeds_list[i]) # set seed for generating current data
+    ## Take bootstrap samples from the historical data matrix
+    X.sim       <- X0[sample(1:nrow(X0), n1, replace = TRUE), ]
+    curdata.sim <- rcureexp(pcure = p_cured, X = X.sim, beta = beta.strapp)
+    num_events[i] <- sum(curdata.sim$rfscens)
+  }
+  num_events
+}
+
+n1.list    <- c(2000, 5000, 10000, 12000)
+num_events <- lapply(n1.list, get_num_events)
+df <- data.frame(num_events = unlist(num_events),  n1 = rep(n1.list, each = 10000))
+
+plot_hist_events <- function(n1_val, df = df){
+  p = ggplot(df %>% filter(n1 == n1_val), aes(x=num_events)) + 
+  labs(x = paste0('number of events for n1 = ', n1_val))+
+  geom_histogram(aes(y=..density..), colour="black", fill="white")+
+  geom_density(alpha=.2, color = 'red') 
+  p
+}
+
+plts = lapply(n1.list, plot_hist_events, df = df)
+plts_covar = ggarrange(plts[[1]], plts[[2]], plts[[3]], plts[[4]], nrow = 2, ncol = 2)
+annotate_figure(plts_covar, top = text_grob("Histogram of Number of Events for Model Including All Covariates", 
+               face = "bold", size = 14))
+
+```
+
+
+# Histogram of Number of Events for Treatment-Only Model
+
+```{r}
+remove(list = ls())
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+
+## source wrappers
+wrapper.dir <- '/proj/ibrahimlab/strapp_paper3/R'
+source(file.path(wrapper.dir, 'wrappers.R'))
+
+seeds_list <- readRDS(file = '/proj/ibrahimlab/strapp_paper3/R/seeds_list.rds')
+
+res.beta.strapp <- readRDS(file = '/proj/ibrahimlab/strapp_paper3/R/res_beta_strapp.rds')
+beta.strapp <- 0
+beta.strapp <- as.matrix(beta.strapp)
+X0          <- res.beta.strapp$X0
+X0          <- X0[, 1, drop = F]
+p_cured     <- res.beta.strapp$p_cured
+rm(res.beta.strapp)
+
+get_num_events <- function(n1){
+  num_events = vector(length = length(seeds_list))
+  
+  for (i in seq_len(length(seeds_list))) {
+    set.seed(seeds_list[i]) # set seed for generating current data
+    ## Take bootstrap samples from the historical data matrix
+    X.sim       <- X0[sample(1:nrow(X0), n1, replace = TRUE), , drop = F]
+    curdata.sim <- rcureexp(pcure = p_cured, X = X.sim, beta = beta.strapp)
+    num_events[i] <- sum(curdata.sim$rfscens)
+  }
+  num_events
+}
+
+n1.list    <- c(2000, 5000, 10000, 12000)
+num_events <- lapply(n1.list, get_num_events)
+df <- data.frame(num_events = unlist(num_events),  n1 = rep(n1.list, each = 10000))
+
+plot_hist_events <- function(n1_val, df = df){
+  p = ggplot(df %>% filter(n1 == n1_val), aes(x=num_events)) + 
+  labs(x = paste0('number of events for n1 = ', n1_val))+
+  geom_histogram(aes(y=..density..), colour="black", fill="white")+
+  geom_density(alpha=.2, color = 'red') 
+  p
+}
+
+plts = lapply(n1.list, plot_hist_events, df = df)
+plts_trt_only = ggarrange(plts[[1]], plts[[2]], plts[[3]], plts[[4]], nrow = 2, ncol = 2)
+annotate_figure(plts_trt_only, top = text_grob("Histogram of Number of Events for Treatment-Only Model", 
+               face = "bold", size = 14))
+
+n1.list    <- c(10000, 500)
+num_events <- lapply(n1.list, get_num_events)
+mean(num_events[[1]]) # 3970.295
+mean(num_events[[2]]) # 198.4029
+```
+
+
+# Histogram of posterior probabilities for n1 = 10000 and 500, treatment-only model
+
+```{r}
+# plot histogram of posterior probabilities for n1 = 10000 under H0, refprior
+library(dplyr)
+library(latex2exp)
+library(ggplot2)
+library(ggpubr)
+
+get_rej_prob <- function(sim.dir){
+  files   <- list.files(path = sim.dir, pattern = '.rds')
+  post_prob = c()
+  for (i in seq_len(length(files))) {
+    simres <- readRDS(file.path(sim.dir, files[i]))$simres
+    post_prob =c(post_prob,
+                 as.numeric(unlist(simres %>% filter(variable == 'beta[1]') %>% select('post_prob')))
+    )
+  }
+  
+  return(post_prob)
+}
+
+sim.dir1 <- '/proj/ibrahimlab/strapp_paper3/Sims/check_type_I_err_refprior/n1_10000_nMCMC_25000_trt_only'
+sim.dir2 <- '/work/users/x/i/xinxinc/strapp_paper3/check_typeIerr/n1_500_trt_only'
+
+post_prob_n1_10000 <- get_rej_prob(sim.dir = sim.dir1)
+post_prob_n1_500   <- get_rej_prob(sim.dir = sim.dir2)
+
+df <- data.frame('post_prob' = c(post_prob_n1_10000, post_prob_n1_500), 'n' = rep(c('n = 10,000', 'n = 500'), each = 10000))
+df$n <- factor(df$n, levels = c('n = 500', 'n = 10,000'))
+
+plt_500_10000 = ggplot(df, aes(x=post_prob)) + 
+  labs(x = TeX("Posterior probability under $\\pi_0^{(s)}$"), subtitle = 'For Treatment-Only Model')+
+  geom_histogram(aes(y=..density..), colour="black", fill="white")+
+  geom_density(alpha=.2, color = 'red') +
+  #facet_grid(n1 ~ .)
+  facet_grid(~n) + 
+  theme(plot.subtitle=element_text(hjust=0.5))
+annotate_figure(plt_500_10000, top = text_grob("Histograms of Posterior Probability under Null Sampling Prior", 
+                                               face = "bold", size = 14)
+)
+#width: 1200, height: 480
+
+#sim.dir <- '/pine/scr/x/i/xinxinc/strapp_paper3/sims_test/refprior/check_type_I_err/n1_10000_nMCMC_25000_trt_only'
+sim.dir <- '/proj/ibrahimlab/strapp_paper3/Sims/check_type_I_err_refprior/n1_10000_nMCMC_25000_trt_only'
+post_prob <- get_rej_prob(sim.dir = sim.dir)
+mean(post_prob > (1 - 0.025)) # 0.0299
+
+library(ggplot2)
+df <- data.frame('post_prob' = post_prob, n1 = 'n1 = 10000')
+
+plt_10000 = ggplot(df, aes(x=post_prob)) + 
+  labs(x = 'posterior probability under the null', subtitle = 'For Treatment-Only Model')+
+  geom_histogram(aes(y=..density..), colour="black", fill="white")+
+  geom_density(alpha=.2, color = 'red')+
+  facet_grid(~n1)
+
+plt_2000_550
+
+plt = ggarrange(plt_2000_550, plt_10000, nrow = 2, labels = c("(a)", "(b)"))
+plt
+```
+
